@@ -39,6 +39,8 @@
 #   CUSTOMMOVER_STATUS        JSON file written when the script ends: mode, result, exit code,
 #                             totals and per share what was found, moved and left
 #   CUSTOMMOVER_STOP          a file: once it exists, no further share is started (exit 3)
+#   CUSTOMMOVER_EXCLUDES_REQUIRED  1 = on a real run (--run) an exclude file that is missing skips its
+#                             share with an ERROR (counted as an error) instead of a WARN
 #
 # INI (smart_mover.ini):
 #   [GLOBAL]  mover_bin, log_file, min_age (days), age_stat (ctime|mtime), global_excludes (comma list),
@@ -74,6 +76,7 @@ TARGET_SHARES="${CUSTOMMOVER_SHARES:-}"
 case "${CUSTOMMOVER_FORCE:-}" in age) FORCE_AGE=true ;; all) FORCE_AGE=true; FORCE_ALL=true ;; esac
 STATUS_FILE="${CUSTOMMOVER_STATUS:-}"
 STOP_FILE="${CUSTOMMOVER_STOP:-}"
+EXCL_REQUIRED="${CUSTOMMOVER_EXCLUDES_REQUIRED:-0}"
 
 usage() {  # prints the header comment block above
     awk 'NR > 2 && /^# =====/ { exit } NR > 2 { sub(/^# ?/, ""); print }' "$0"
@@ -102,10 +105,11 @@ SHARE_JSON=()
 SH_STATE=""; SH_DIRECTION=""; SH_FILES=0; SH_BYTES=0; SH_MOVED=0; SH_LEFT=0
 SH_AGE=""; SH_STAT=""; SH_THRESHOLD=""; SH_EXCLUDES=""
 
-json_str() {  # text -> a JSON string (quotes, backslashes and control characters escaped or dropped)
+json_str() {  # text -> a JSON string (invalid UTF-8 dropped; quotes, backslashes escaped; other control characters and DEL dropped)
     local s="$1"
+    if command -v iconv >/dev/null 2>&1; then s=$(printf '%s' "$s" | iconv -c -f UTF-8 -t UTF-8 2>/dev/null); fi
     s=${s//\\/\\\\}; s=${s//\"/\\\"}; s=${s//$'\n'/\\n}; s=${s//$'\r'/\\r}; s=${s//$'\t'/\\t}
-    s=$(printf '%s' "$s" | tr -d '\000-\010\013\014\016-\037')
+    s=$(printf '%s' "$s" | tr -d '\000-\010\013\014\016-\037\177')
     printf '"%s"' "$s"
 }
 
@@ -250,11 +254,17 @@ build_excludes() {  # share_name source_root exclude_files(comma list)...
     local share="$1" src="$2"; shift 2
     EXCL_ARGS=(-false)
     EXCL_COUNT=0
+    EXCL_MISSING=""
     local f line
     for f in "$@"; do
         f="${f#"${f%%[![:space:]]*}"}"; f="${f%"${f##*[![:space:]]}"}"
         [[ -z "$f" ]] && continue
-        if [[ ! -f "$f" ]]; then log WARN "  exclude file not found: $f"; continue; fi
+        if [[ ! -f "$f" ]]; then
+            # office: on a real run a list that is gone must not let its files move
+            if [[ "$EXCL_REQUIRED" == "1" && "$DRY_RUN" == false ]]; then log ERROR "  exclude file not found: $f"; EXCL_MISSING="$f"
+            else log WARN "  exclude file not found: $f"; fi
+            continue
+        fi
         while IFS= read -r line || [[ -n "$line" ]]; do
             line="${line%$'\r'}"
             line="${line#"${line%%[![:space:]]*}"}"; line="${line%"${line##*[![:space:]]}"}"
@@ -372,6 +382,7 @@ process_share() {  # name mode pool pool2
         local -a EXCL_FILES=()
         IFS=',' read -ra EXCL_FILES <<< "$GLOBAL_EXC,$excludes"
         build_excludes "$name" "$src" "${EXCL_FILES[@]}"
+        if [[ -n "${EXCL_MISSING:-}" ]]; then log ERROR "  [$name] an exclude file is missing – share skipped (nothing moved)"; return 1; fi
         (( EXCL_COUNT > 0 )) && log INFO "  excludes: $EXCL_COUNT patterns"
     fi
 

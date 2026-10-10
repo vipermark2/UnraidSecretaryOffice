@@ -21,6 +21,11 @@
 > * `CUSTOMMOVER_STOP` (a file): once it exists, no further share is started — never in the middle of a share's move
 >   (one move call per share, as upstream); result `stopped`, exit 3, `stop_share` names the first share left out.
 >   Ms. Moverelli writes it when Unraid's own mover starts during her run, or when the user asks on her page.
+> * `CUSTOMMOVER_EXCLUDES_REQUIRED=1`: on a real run (`--run`) an exclude file that is missing skips its share with an
+>   ERROR (counted in `errors`, state `error`) instead of a WARN — a list that is gone never lets its files move. Dry runs
+>   still only warn. Ms. Moverelli sets it for real runs.
+> * The status JSON's texts are made safe: invalid UTF-8 is dropped (`iconv -c`, when there), control characters and DEL
+>   too.
 > * Not taken over: `setup_custommover.sh` (Ms. Moverelli is the setup). The office never passes `--force` or
 >   `--force-all`, and never `CUSTOMMOVER_IGNORE_MOVER`. The tests point `CUSTOMMOVER_ZFS` (upstream) at a stand-in.
 >
