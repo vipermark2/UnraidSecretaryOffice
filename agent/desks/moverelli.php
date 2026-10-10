@@ -89,6 +89,8 @@ function moverelliHost(): array
         'mover_running' => $h['mover_running'] ?? fn (?int $self = null): bool => embyMoverRunning(null, $self),
         'jack_busy'     => $h['jack_busy'] ?? fn (): bool => embyAnyRunning(),
         'emby'          => $h['emby'] ?? fn (): ?array => moverelliJackLists(),
+        // EmbyCache's list (both forms of its path), hired or not: not there before EmbyCache's first run — may be missing
+        'jack_lists'    => $h['jack_lists'] ?? fn (): array => (embyMoverHost()['lists'])(),
         'scheduled'     => $h['scheduled'] ?? fn (): bool => officeJobSchedule('moverelli')['enabled'],
         'gate'          => $h['gate'] ?? [],         // embyRunGate()'s options (the tests: sleep, now, array, max)
         'look_every'    => $h['look_every'] ?? EMBY_MOVER_LOOK,     // during a real run: is Unraid's mover at work? every … s
@@ -861,7 +863,9 @@ function moverelliJob(array $args, ?array $h = null): int
             'CUSTOMMOVER_INI' => "$dir/smart_mover.ini", 'CUSTOMMOVER_LOG' => "$dir/smart_mover.log", 'CUSTOMMOVER_LOCK' => "$dir/smartmover.lock",
             'CUSTOMMOVER_STATUS' => "$dir/status.json", 'CUSTOMMOVER_STOP' => "$dir/office-stop.json",
             'CUSTOMMOVER_SHARES_DIR' => $h['shares_dir'], 'CUSTOMMOVER_MNT' => $h['mnt'], 'OFFICE_RUN_DIR' => RUN_DIR]
-         + ($real ? ['CUSTOMMOVER_EXCLUDES_REQUIRED' => '1'] : []) + $h['env'];     // a real run: a list that is gone skips its share
+         // a real run: a list that is gone skips its share — but EmbyCache's, before its first run, is simply empty
+         + ($real ? ['CUSTOMMOVER_EXCLUDES_REQUIRED' => '1', 'CUSTOMMOVER_EXCLUDES_OPTIONAL' => implode(',', array_filter(($h['jack_lists'])(),
+               fn ($p) => is_string($p) && !str_contains($p, ',')))] : []) + $h['env'];
     $out = fopen("$dir/office-output.txt", 'w');
     $proc = proc_open(array_merge(['bash', "$h[app]/custommover_run.sh"], MOVERELLI_MODES[$mode]), [0 => ['file', '/dev/null', 'r'], 1 => $out, 2 => $out], $pipes, '/', $env);
     $why = null;
