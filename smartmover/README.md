@@ -26,8 +26,11 @@
 >   still only warn. Ms. Moverelli sets it for real runs.
 > * `CUSTOMMOVER_EXCLUDES_OPTIONAL` (comma separated paths): an exclude file named there that doesn't exist counts as an
 >   empty list (an INFO line), also with `CUSTOMMOVER_EXCLUDES_REQUIRED=1`. Ms. Moverelli names Jack Emby's
->   `embycache_exclude.txt` there: EmbyCache writes it only at its first run or import, and a list that isn't there yet
->   protects nothing (the office's shared start lock keeps an EmbyCache run from going at the same time).
+>   `embycache_exclude.txt` there only while EmbyCache has never run for real nor been imported on the server (Jack's
+>   traces: `embycache_origin.json`, an import's `*.before-import-*` copy, an EmbyCache run or release in his list of
+>   runs or his last run's marker): EmbyCache writes the list only at its first real run or import, and a list that
+>   isn't there yet protects nothing (the office's shared start lock keeps an EmbyCache run from going at the same time).
+>   Once EmbyCache has run, a missing list is an error again — his films stay where they are.
 > * The status JSON's texts are made safe: invalid UTF-8 is dropped (`iconv -c`, when there), control characters and DEL
 >   too.
 > * Not taken over: `setup_custommover.sh` (Ms. Moverelli is the setup). The office never passes `--force` or
