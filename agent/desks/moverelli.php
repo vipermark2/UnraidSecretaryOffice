@@ -48,6 +48,9 @@ const MOVERELLI_FOREIGN = [
     'smartmover' => '~custommover_run\.sh~',
 ];
 
+// a crontab line that runs something: five time fields or an @word, then a command (a VAR=value line is none)
+const MOVERELLI_CRON_LINE = '/^(?:@(?:reboot|yearly|annually|monthly|weekly|daily|midnight|hourly)|[0-9*\/,\-A-Za-z]+(?:\s+[0-9*\/,\-A-Za-z]+){4})\s+\S/';
+
 define('MOVERELLI_APP', OFFICE_DIR . '/smartmover');
 define('MOVERELLI_DATA', DATA_DIR . '/moverelli');
 
@@ -91,6 +94,8 @@ function moverelliHost(): array
         'look_every'    => $h['look_every'] ?? EMBY_MOVER_LOOK,     // during a real run: is Unraid's mover at work? every … s
         'waitdir'       => $h['waitdir'] ?? RUN_DIR,
         'write_state'   => $h['write_state'] ?? true,
+        'hired'         => $h['hired'] ?? fn (): bool => moverelliHired(),
+        'lock_wait'     => $h['lock_wait'] ?? 30,  // s: the start lock she shares with Jack Emby (embyMoversLock())
         // other movers on a schedule of their own (moverelliForeign()): Mover Tuning, User Scripts, plugins' cron lines
         'tuning'        => $h['tuning'] ?? fn (): bool => (embyMoverHost()['installed'])(),
         'tuning_dir'    => $h['tuning_dir'] ?? EMBY_TUNING_DIR,
@@ -146,7 +151,8 @@ function moverelliForeign(array $h): array
     if ($tuning['installed']) {
         foreach (glob("$h[tuning_dir]/*.cron") ?: [] as $file) {
             foreach (explode("\n", embyActiveText((string) @file_get_contents($file, false, null, 0, 65536))) as $line) {
-                if (($cron = embyMoverCronLine($line, '/\S/')) !== null) {
+                // a cron line: five time fields (or @daily …) and a command — never a VAR=value line
+                if (preg_match(MOVERELLI_CRON_LINE, trim($line)) && ($cron = embyMoverCronLine($line, '/\S/')) !== null) {
                     $tuning['lines'][] = ['file' => basename($file), 'cron' => $cron];
                 }
             }
@@ -394,7 +400,8 @@ function moverelliCheck(mixed $in, array $shares, string $dir): array
         'patterns'             => $patterns,
     ], 'shares' => []];
     foreach ($in['shares'] as $share => $s) {
-        if (!is_string($share) || !preg_match(MOVERELLI_SHARE, $share) || !in_array($share, $shares, true)) {
+        $share = (string) $share;            // JSON's «"2024": {…}» arrives as an int key
+        if (!preg_match(MOVERELLI_SHARE, $share) || !in_array($share, $shares, true)) {
             throw new Problem('moverelli_bad_share', ['share' => mb_substr((string) $share, 0, 80)]);
         }
         if (!is_array($s) || !is_bool($s['skip'] ?? null)) {
@@ -414,7 +421,7 @@ function moverelliCheck(mixed $in, array $shares, string $dir): array
             $out['shares'][$share] = $row;
         }
     }
-    ksort($out['shares']);
+    ksort($out['shares'], SORT_STRING);
     return $out;
 }
 
@@ -436,6 +443,7 @@ function moverelliIniText(array $set, string $dir): string
         $text .= "global_excludes=$l\n";
     }
     foreach ($set['shares'] as $share => $s) {
+        $share = (string) $share;
         $text .= "\n[$share]\n";
         if ($s['skip']) {
             $text .= "skip=yes\n";
@@ -469,20 +477,24 @@ function moverelliWrite(array $set, string $dir): void
     moverelliDataDir($dir);
     @mkdir("$dir/excludes", 0700, true);
     $keep = [];
-    $own = ['' => $set['global']['patterns']] + array_map(fn ($s) => $s['patterns'], $set['shares']);
-    foreach ($own as $share => $lines) {
+    $own = [['', $set['global']['patterns']]];
+    foreach ($set['shares'] as $share => $s) {
+        $own[] = [(string) $share, $s['patterns']];          // a share named «2024» is an int key in PHP
+    }
+    foreach ($own as [$share, $lines]) {
         if ($lines) {
-            $file = moverelliOwnFile($dir, $share === '' ? null : (string) $share);
+            $file = moverelliOwnFile($dir, $share === '' ? null : $share);
             writeAtomic($file, implode("\n", $lines) . "\n", 0600, 0, 0);
             $keep[$file] = true;
         }
     }
+    // the ini first (it names only lists that exist now), then the lists no scope uses any more go
+    writeAtomic("$dir/smart_mover.ini", moverelliIniText($set, $dir), 0600, 0, 0);
     foreach (glob("$dir/excludes/*.txt") ?: [] as $f) {
         if (!isset($keep[$f])) {
             @unlink($f);
         }
     }
-    writeAtomic("$dir/smart_mover.ini", moverelliIniText($set, $dir), 0600, 0, 0);
 }
 
 /** moverelli.save: checked, refused while a run of hers goes, written; logged */
@@ -496,7 +508,21 @@ function moverelliSave(mixed $in, ?array $h = null): array
         throw new Problem('moverelli_running');
     }
     $set = moverelliCheck($in, moverelliShareNames($h['shares_dir']), $h['dir']);
-    moverelliWrite($set, $h['dir']);
+    // her run's lock held while writing: a run can't start meanwhile, and one that holds it refuses the save
+    moverelliDataDir($h['dir']);
+    $lock = @fopen("$h[dir]/office-run.lock", 'c');
+    if (!$lock || !flock($lock, LOCK_EX | LOCK_NB)) {
+        if ($lock) {
+            fclose($lock);
+        }
+        throw new Problem('moverelli_running');
+    }
+    try {
+        moverelliWrite($set, $h['dir']);
+    } finally {
+        flock($lock, LOCK_UN);
+        fclose($lock);
+    }
     logLine('Ms. Moverelli: Smart Mover settings saved (' . count($set['shares']) . ' shares with rules of their own)');
     return ['ok' => true, 'state' => moverelliScan($h)];
 }
@@ -614,7 +640,8 @@ function moverelliScan(?array $h = null): array
         'unraid'     => ['version' => $version, 'ok' => moverelliUnraidOk($version), 'needed' => MOVERELLI_UNRAID],
         'engine'     => moverelliEngineVersion($h['app']),
         'configured' => $settings !== null,
-        'settings'   => $settings ?? moverelliDefaults(),
+        // shares as an object for the page: a share named «0» or «2024» must not turn the map into a list
+        'settings'   => ['global' => ($settings ?? moverelliDefaults())['global'], 'shares' => (object) ($settings ?? moverelliDefaults())['shares']],
         'shares'     => moverelliShares($settings ?? moverelliDefaults(), $h['shares_dir']),
         // Unraid's own mover: its schedule (real runs only while «Disabled»), at work right now
         'mover'      => ['off' => embyMoverScheduleOff($own), 'schedule' => $own['cron'] ?? ($own['set'] !== '' ? $own['set'] : null),
@@ -758,6 +785,12 @@ function moverelliJob(array $args, ?array $h = null): int
     $by = in_array('--office', $args, true) ? 'office' : 'schedule';
     $args = array_values(array_filter($args, fn ($a) => !str_starts_with($a, '--')));
     $mode = $args[0] ?? 'run';
+    // let go (or never hired): a schedule line left in the office's cron file moves nothing — said in the log only
+    if (!($h['hired'])()) {
+        logLine("Ms. Moverelli: Smart Mover ($mode) not started — she isn't hired (a schedule left behind does nothing)");
+        fwrite(STDERR, "moverelli: not started (not hired)\n");
+        return 1;
+    }
     $refused = function (string $why, array $params = []) use ($mode, $by, $dir): int {
         moverelliRemember(['mode' => $mode, 'by' => $by, 'started' => time(), 'finished' => time(), 'result' => 'refused', 'why' => $why]
             + array_intersect_key($params, ['schedule' => 1, 'shares' => 1, 'version' => 1, 'file' => 1]), $dir);
@@ -803,21 +836,32 @@ function moverelliJob(array $args, ?array $h = null): int
         }
     }
     moverelliDataDir($dir);
+    // the start lock she shares with Jack Emby: his runs' check and marker and hers never interleave (two cron jobs in
+    // the same minute) — inside it: none of his going, her own lock taken, her office-run.json written
+    $movers = embyMoversLock((int) $h['lock_wait']);
+    if ($movers === null || ($h['jack_busy'])()) {
+        embyMoversUnlock($movers);
+        embyWaitEnd($wait, $h['waitdir'], 'moverelli');
+        return $refused('moverelli_emby_running');
+    }
     $hold = @fopen("$dir/office-run.lock", 'c');
     if (!$hold || !flock($hold, LOCK_EX | LOCK_NB)) {
+        embyMoversUnlock($movers);
         embyWaitEnd($wait, $h['waitdir'], 'moverelli');
         return $refused('moverelli_running');
     }
     $started = time();
     $run = ['mode' => $mode, 'by' => $by, 'started' => $started, 'pid' => getmypid()];
     writeAtomic("$dir/office-run.json", jsonEncode($run), 0600, 0, 0);
+    embyMoversUnlock($movers);
     embyWaitEnd($wait, $h['waitdir'], 'moverelli');
     @unlink("$dir/status.json");
     @unlink("$dir/office-stop.json");
     $env = ['PATH' => '/usr/local/sbin:/usr/sbin:/sbin:/usr/local/bin:/usr/bin:/bin', 'HOME' => '/root', 'LANG' => 'C.UTF-8',
             'CUSTOMMOVER_INI' => "$dir/smart_mover.ini", 'CUSTOMMOVER_LOG' => "$dir/smart_mover.log", 'CUSTOMMOVER_LOCK' => "$dir/smartmover.lock",
             'CUSTOMMOVER_STATUS' => "$dir/status.json", 'CUSTOMMOVER_STOP' => "$dir/office-stop.json",
-            'CUSTOMMOVER_SHARES_DIR' => $h['shares_dir'], 'CUSTOMMOVER_MNT' => $h['mnt'], 'OFFICE_RUN_DIR' => RUN_DIR] + $h['env'];
+            'CUSTOMMOVER_SHARES_DIR' => $h['shares_dir'], 'CUSTOMMOVER_MNT' => $h['mnt'], 'OFFICE_RUN_DIR' => RUN_DIR]
+         + ($real ? ['CUSTOMMOVER_EXCLUDES_REQUIRED' => '1'] : []) + $h['env'];     // a real run: a list that is gone skips its share
     $out = fopen("$dir/office-output.txt", 'w');
     $proc = proc_open(array_merge(['bash', "$h[app]/custommover_run.sh"], MOVERELLI_MODES[$mode]), [0 => ['file', '/dev/null', 'r'], 1 => $out, 2 => $out], $pipes, '/', $env);
     $why = null;

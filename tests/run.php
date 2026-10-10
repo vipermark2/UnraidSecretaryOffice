@@ -2393,15 +2393,32 @@ function testEmbyMover(): void
         [$r['ok'], $r['way'], $r['moverelli'], array_key_exists('moverelli', embyMoverState($r))]);
     $look = ['global' => [], 'shares' => []];
     $r = embyMoverRule();
-    same('mover moverelli: hired, her ini without his list — no, his shares named (refusal, the Team Lead\'s point, his page\'s state)',
-        [false, null, 'moverelli_list', ['Filme', 'Serien'], 'emby_mover_moverelli_list', 'Filme, Serien', ['mover_moverelli', false, ['shares' => 'Filme, Serien']], ['uncovered' => ['Filme', 'Serien']]],
-        [$r['ok'], $r['way'], $r['why'], $r['moverelli']['uncovered'], embyMoverProblem($r)?->key, embyMoverProblem($r)?->params['shares'] ?? null,
+    same('mover moverelli: hired, her ini without his list — no, his shares and EmbyCache\'s list named (no Mover Tuning here) (refusal, the Team Lead\'s point, his page\'s state)',
+        [false, null, 'moverelli_list', ['Filme', 'Serien'], 'emby_mover_moverelli_list', ['file' => $list, 'shares' => 'Filme, Serien'], ['mover_moverelli', false, ['shares' => 'Filme, Serien']],
+         ['uncovered' => ['Filme', 'Serien'], 'file' => $list]],
+        [$r['ok'], $r['way'], $r['why'], $r['moverelli']['uncovered'], embyMoverProblem($r)?->key, array_intersect_key(embyMoverProblem($r)?->params ?? [], ['shares' => 1, 'file' => 1]),
          [embyMoverFinding($r)['id'], embyMoverFinding($r)['ok'], embyMoverFinding($r)['params']], embyMoverState($r)['moverelli'] ?? null]);
     $look = ['global' => ['/mnt/user/system/keep.txt', $list], 'shares' => []];
     $r = embyMoverRule();
     same('mover moverelli: his list in her global_excludes — real runs go, the third way', [true, 'moverelli', null, []], [$r['ok'], $r['way'], $r['why'], $r['moverelli']['uncovered']]);
     $look = ['global' => [], 'shares' => ['Filme' => ['skip' => false, 'excludes' => ["$tmp/data/embycache_exclude.txt"]], 'Serien' => ['skip' => true, 'excludes' => []]]];
     same('mover moverelli: … per share (the list by its other path), a share left out — fine', [true, 'moverelli'], [embyMoverRule()['ok'], embyMoverRule()['way']]);
+    // her way is an alternative to Mover Tuning's: installed but without his list (not hired: not entered), a share's
+    // override saying «No» — her list holds; only Mover Tuning's forced move on a schedule still refuses
+    $cfgWas = (string) file_get_contents($cfg);
+    [$installed, $hired] = [true, false];
+    file_put_contents($cfg, $fresh);
+    file_put_contents("$tmp/tuning/shareOverrideConfig/Filme.cfg", "moverOverride=\"yes\"\nfilelistf=\"no\"\n");
+    $r = embyMoverRule();
+    same('mover moverelli: Mover Tuning without his list and a share\'s override «No» — her way holds', [true, 'moverelli', null, false, $fresh],
+        [$r['ok'], $r['way'], $r['why'], $r['tuning']['listed'], file_get_contents($cfg)]);
+    file_put_contents($cfg, str_replace('force="no"', 'force="yes"', $fresh) . "force=\"yes\"\n");
+    file_put_contents("$tmp/tuning/mover.cron", "0 5 * * 0 /usr/local/emhttp/plugins/ca.mover.tuning/mover.php force start |& logger -t move\n");
+    same('mover moverelli: … Mover Tuning\'s forced move on a schedule — still no', [false, 'tuning_force'], [embyMoverRule()['ok'], embyMoverRule()['why']]);
+    @unlink("$tmp/tuning/mover.cron");
+    @unlink("$tmp/tuning/shareOverrideConfig/Filme.cfg");
+    file_put_contents($cfg, $cfgWas);
+    [$installed, $hired] = [false, true];
     $look = ['global' => [], 'shares' => ['Filme' => ['skip' => false, 'excludes' => ['/mnt/user/system/keep.txt']], 'Musik' => ['skip' => false, 'excludes' => [$list]]]];
     same('mover moverelli: another list for Filme, his list only for a share that isn\'t his — no', ['moverelli_list', ['Filme', 'Serien']],
         [embyMoverRule()['why'], embyMoverRule()['moverelli']['uncovered']]);
@@ -2412,6 +2429,13 @@ function testEmbyMover(): void
     $src = (string) file_get_contents(OFFICE_DIR . '/agent/desks/emby.php');
     check('mover moverelli: his runs never beside one of hers (embyRunCheck asks moverelliBusy())',
         str_contains($src, "if (function_exists('moverelliBusy') && moverelliBusy()) {\n        throw new Problem('emby_moverelli_running');"));
+    // the start lock they share: his check «none of hers» and his marker inside it
+    $at = fn (string $x) => strpos($src, $x);
+    check('mover moverelli: his job — the shared start lock, «none of hers», his office-run.json, then the lock let go',
+        $at('$movers = embyMoversLock();') !== false && $at('$movers = embyMoversLock();') < $at("if (\$movers === null || (function_exists('moverelliBusy') && moverelliBusy())) {")
+        && $at("if (\$movers === null || (function_exists('moverelliBusy') && moverelliBusy())) {") < $at('writeAtomic("$dir/office-run.json", jsonEncode($run), 0600, 0, 0);')
+        && $at('writeAtomic("$dir/office-run.json", jsonEncode($run), 0600, 0, 0);') < $at('embyMoversUnlock($movers);
+    embyWaitEnd($wait, RUN_DIR, $tool);          // the run shows'));
 
     // EmbyCache stops after the file it is on (--release on a fixture tree; an rsync stand-in «starts the mover» after its first file)
     [$exit] = run(['python3', '--version'], 10);
@@ -26900,7 +26924,7 @@ SH);
         chmod("$tmp/bin/$b", 0755);
     }
     $v += ['version' => '7.3.2', 'own' => ['set' => '', 'cron' => null], 'mover' => false, 'mover_self' => false, 'busy' => false, 'emby' => null,
-           'tuning' => false, 'env' => []];
+           'tuning' => false, 'env' => [], 'hired' => true];
     $GLOBALS['moverelliHost'] = [
         'dir' => "$tmp/data", 'shares_dir' => "$tmp/shares", 'mnt' => "$tmp/mnt", 'waitdir' => "$tmp/run", 'write_state' => false, 'look_every' => 0,
         'env' => ['CUSTOMMOVER_MOVER_BIN' => "$tmp/bin/move", 'CUSTOMMOVER_ZFS' => "$tmp/bin/zfs", 'MOVE_ROOT' => "$tmp/mnt"],
@@ -26909,7 +26933,8 @@ SH);
         'mover_running' => function (?int $self = null) use (&$v) { return $self === null ? $v['mover'] : $v['mover_self']; },
         'jack_busy' => function () use (&$v) { return $v['busy']; },
         'emby' => function () use (&$v) { return $v['emby']; },
-        'scheduled' => fn () => true,
+        'scheduled' => fn () => true, 'lock_wait' => 1,
+        'hired' => function () use (&$v) { return $v['hired']; },
         'tuning' => function () use (&$v) { return $v['tuning']; },
         'tuning_dir' => "$tmp/tuning", 'us_dir' => "$tmp/us", 'cron_glob' => "$tmp/plugins/*/*.cron", 'unraid_cron' => "$tmp/plugins/dynamix/mover.cron",
     ];
@@ -27050,6 +27075,23 @@ function testMoverelliIni(): void
         moverelliExcludeFrom($dir));
     same('moverelli ini: … his shares covered', [[], ['Musik']], [moverelliJackUncovered(['lists' => ['/x/embycache_exclude.txt'], 'shares' => ['Filme', 'Back']], $dir),
         moverelliJackUncovered(['lists' => ['/y/other.txt'], 'shares' => ['Back', 'Musik']], $dir)]);
+    // a share named «2024»: JSON gives PHP an int key — taken as the share's name all the way
+    file_put_contents("$tmp/shares/2024.cfg", "shareUseCache=\"yes\"\nshareCachePool=\"cache\"\n");
+    $in = json_decode('{"global": {"min_age": 0, "age_stat": "ctime", "move_when_used_above": 0, "move_prefer_shares": true, "mover_debug": 0, "max_list": 50, "files": [], "patterns": []},'
+        . ' "shares": {"2024": {"skip": false, "min_age": 7, "age_stat": null, "move_when_used_above": null, "files": [], "patterns": ["*.tmp"]}}}', true);
+    $r = moverelliSave($in, $h);
+    $ini = (string) file_get_contents("$dir/smart_mover.ini");
+    same('moverelli ini: a share named 2024 — its section, its list, read back, the page gets an object', [true, true, true, [2024], '{"2024":'],
+        [str_contains($ini, "[2024]\nmin_age=7\nexcludes=$dir/excludes/share-2024.txt"), is_file("$dir/excludes/share-2024.txt"),
+         moverelliSettings($dir)['shares'][2024]['min_age'] === 7, array_keys(moverelliSettings($dir)['shares']),
+         substr(json_encode($r['state']['settings']['shares']), 0, 8)]);
+    unlink("$tmp/shares/2024.cfg");
+    $r = moverelliSave(moverelliTestSettings(), $h);
+    same('moverelli ini: … no share with rules of its own — still an object for the page, never a list', '{}', json_encode($r['state']['settings']['shares']));
+    // the status JSON's texts: quotes, backslashes, control characters, DEL and invalid UTF-8 never break it
+    $fn = preg_match('/^json_str\(\) \{.*?^\}/ms', (string) file_get_contents(OFFICE_DIR . '/smartmover/custommover_run.sh'), $m) ? $m[0] : '';
+    [, $out] = run(['bash', '-c', "$fn\njson_str \"\$1\"", 'x', "a\"b\\c\x7fd\xffe\nf\x01g"], 10);
+    same('moverelli status: json_str makes any text valid JSON', "a\"b\\cde\nfg", json_decode($out));
     unset($GLOBALS['moverelliHost']);
     hardeningRm($tmp);
 }
@@ -27073,6 +27115,11 @@ function testMoverelliRun(): void
     moverelliSave(moverelliTestSettings(['patterns' => ['*.nfo']]), $h);
     $files = fn () => array_map(fn ($f) => substr($f, strlen("$tmp/mnt/")), array_merge(glob("$tmp/mnt/*/*/*") ?: [], glob("$tmp/mnt/*/*/*/*") ?: []));
     $before = $files();
+    // let go: a schedule line left in the office's cron file moves nothing
+    $v['hired'] = false;
+    same('moverelli run: not hired (let go) — a scheduled run does nothing, nothing recorded, nothing moved', [1, [], $before, false],
+        [moverelliJob(['run'], $h), moverelliHistory($dir), $files(), file_exists("$dir/office-run.json")]);
+    $v['hired'] = true;
 
     same('moverelli run: the list — exit 0, every share with its state, nothing moved', [0, 'list', 'ok', [['Back', 'list'], ['Docs', 'list'], ['Filme', 'list']], $before],
         [moverelliJob(['list', '--office'], $h), readJson("$dir/status.json")['mode'] ?? null, readJson("$dir/status.json")['result'] ?? null,
@@ -27138,6 +27185,17 @@ function testMoverelliRun(): void
          moverelliNotifyOutcome('list', 'errors', [])]);
     // output and log
     check('moverelli run: output and log of the last run', str_contains(moverelliOutput($h)['text'], 'move binary exited with code 1') && str_contains(moverelliLog($h)['text'], 'Smart Mover start'));
+    // a list that is gone: a dry run only warns, a real run skips the share with an error — nothing of it moves
+    $docs = ['skip' => false, 'min_age' => null, 'age_stat' => null, 'move_when_used_above' => null, 'files' => ['/office-tests-none/keep.txt'], 'patterns' => []];
+    moverelliSave(moverelliTestSettings(['patterns' => ['*.nfo']], ['Docs' => $docs]), $h);
+    $state = function () use ($dir): array { foreach (readJson("$dir/status.json")['shares'] ?? [] as $x) { if ($x['share'] === 'Docs') { return [$x['state'], $x['moved']]; } } return []; };
+    moverelliJob(['dry', '--office'], $h);
+    $dry = [$state(), str_contains((string) file_get_contents("$dir/office-output.txt"), '[WARN]   exclude file not found: /office-tests-none/keep.txt')];
+    moverelliJob(['run', '--office'], $h);
+    $notified();
+    same('moverelli run: an exclude list gone — the dry run warns, the real run skips Docs with an error, its file stays', [[['dry', 0], true], ['error', 0], 'errors', true],
+        [$dry, $state(), readJson("$dir/status.json")['result'] ?? null, is_file("$tmp/mnt/cache/Docs/f.txt")]);
+    moverelliSave(moverelliTestSettings(['patterns' => ['*.nfo']]), $h);
 
     // her list of runs: at most 40, a scheduled refusal again for the same reason counted on one line
     for ($i = 0; $i < 45; $i++) {
@@ -27189,9 +27247,22 @@ function testMoverelliGates(): void
     file_put_contents("$tmp/tuning/mover.cron", "# Generated schedule for forced move:\n# 0 5 * * 0 /usr/local/emhttp/plugins/ca.mover.tuning/mover.php force start\n");
     same('moverelli gate: … its line commented out — no schedule', false, moverelliForeign($h)['tuning']['active']);
     file_put_contents("$tmp/tuning/mover.cron", "0 5 * * 0 /usr/local/emhttp/plugins/ca.mover.tuning/mover.php force start\n");
+    file_put_contents("$tmp/tuning/mover.cron", "SHELL=/bin/bash\nPATH=/usr/local/sbin:/usr/bin\nMAILTO=\"\"\n");
+    same('moverelli gate: … only variables in its cron file — no schedule', false, moverelliForeign($h)['tuning']['active']);
+    file_put_contents("$tmp/tuning/mover.cron", "0 5 * * 0 /usr/local/emhttp/plugins/ca.mover.tuning/mover.php force start\n");
     $v['tuning'] = false;
     same('moverelli gate: … Mover Tuning not installed — its old files don\'t count', false, moverelliForeign($h)['tuning']['active']);
 
+    // the start lock shared with Jack Emby (embyMoversLock()): held by another start — hers waits, then refused
+    $movers = fopen(RUN_DIR . '/' . EMBY_MOVERS_LOCK, 'c');
+    flock($movers, LOCK_EX);
+    $t0 = microtime(true);
+    $runWas = @file_get_contents("$dir/office-run.json");
+    same('moverelli gate: the start lock held by one of Jack\'s starts — waited (1 s here), refused, her marker untouched', [1, 'moverelli_emby_running', true, $runWas],
+        [moverelliJob(['dry', '--office'], $h), $last(), microtime(true) - $t0 >= 1, @file_get_contents("$dir/office-run.json")]);
+    flock($movers, LOCK_UN);
+    fclose($movers);
+    same('moverelli gate: … let go — hers goes', 0, moverelliJob(['dry', '--office'], $h));
     $v['busy'] = true;
     same('moverelli gate: one of Jack Emby\'s runs going — refused', [1, 'moverelli_emby_running'], [moverelliJob(['dry', '--office'], $h), $last()]);
     $v['busy'] = false;

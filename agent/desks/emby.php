@@ -2408,9 +2408,25 @@ function embyJob(string $tool, array $args): int
         }
     }
     embyDataDir($dir);
+    // the start lock shared with Ms. Moverelli (emby-mover.php): none of her runs going, then his marker — one at a time
+    $movers = embyMoversLock();
+    if ($movers === null || (function_exists('moverelliBusy') && moverelliBusy())) {
+        embyMoversUnlock($movers);
+        embyWaitEnd($wait, RUN_DIR, $tool);
+        if ($hold) {
+            flock($hold, LOCK_UN);
+            fclose($hold);
+        }
+        embyRemember(['tool' => $tool, 'mode' => $mode, 'by' => $by, 'started' => time(), 'finished' => time(), 'result' => 'refused', 'why' => 'emby_moverelli_running']);
+        if ($mode === 'release') {
+            embyReleaseRefusedTell('emby_moverelli_running');
+        }
+        return 1;
+    }
     $started = time();
     $run = ['tool' => $tool, 'mode' => $mode, 'by' => $by, 'started' => $started, 'pid' => getmypid()];
     writeAtomic("$dir/office-run.json", jsonEncode($run), 0600, 0, 0);
+    embyMoversUnlock($movers);
     embyWaitEnd($wait, RUN_DIR, $tool);          // the run shows as running now: a second start is refused by that
     @unlink("$dir/status.json");
     @unlink("$dir/office-stop.json");

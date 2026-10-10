@@ -234,8 +234,10 @@ const moverOk = () => { const m = mover(); return !m || !!m.ok; };
 function moverWhy(m) {
   const t = m.tuning || {};
   // Ms. Moverelli's ini without his list: her shares named (emby-mover.php embyMoverelliUncovered())
-  const shares = m.why === 'moverelli_list' ? ((m.moverelli || {}).uncovered || []) : (t.overrides || []);
-  return Office.errorText({ key: 'emby_mover_' + m.why, params: { file: t.file || '', detail: t.error || '', shares: shares.join(', ') } }, ID);
+  const mo = m.why === 'moverelli_list' ? (m.moverelli || {}) : null;
+  const shares = mo ? (mo.uncovered || []) : (t.overrides || []);
+  // EmbyCache's list: Mover Tuning's entry, or for Ms. Moverelli the list itself (also without Mover Tuning)
+  return Office.errorText({ key: 'emby_mover_' + m.why, params: { file: (mo ? mo.file : t.file) || '', detail: t.error || '', shares: shares.join(', ') } }, ID);
 }
 
 /**

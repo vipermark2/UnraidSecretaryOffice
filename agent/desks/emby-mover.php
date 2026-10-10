@@ -35,7 +35,10 @@ declare(strict_types=1);
  * Ms. Moverelli (agent/desks/moverelli.php) runs the bundled Smart Mover on the office's schedule: while she is hired,
  * her smart_mover.ini must keep his list out for each of his shares — the file in `global_excludes` or in the share's
  * `excludes=`, or the share `skip=yes` — else she would carry his films back (`moverelli_list`); kept, real runs go that
- * way (`way` «moverelli»). Her runs and his never run at the same time (embyRunCheck(), moverelliRunCheck()).
+ * way (`way` «moverelli») — an alternative to Mover Tuning's list: then Mover Tuning (installed or not, its list or a
+ * share's override) doesn't count, only its forced move on a schedule. Her runs and his never run at the same time
+ * (embyRunCheck(), moverelliRunCheck()); their starts take one lock (embyMoversLock()), so two cron jobs of the same
+ * minute can't both pass the check.
  * ⟦Move now⟧ in ⟦Mover Settings⟧ and on the Main page start Unraid's mover by hand — a hand's doing: the guards below
  * stop his run, his page says so.
  *
@@ -62,6 +65,7 @@ const EMBY_MOVER_MAX       = 7200;     // … for up to 2 h, then that run is sk
 const EMBY_MOVER_LOOK      = 5;        // during a real run: is the mover at work? every 5 s
 const EMBY_MOVER_VAR       = '/var/local/emhttp/var.ini';        // emhttpd's live settings (what ⟦Mover Settings⟧ shows)
 const EMBY_EMCMD           = '/usr/local/sbin/emcmd';            // Unraid's way to send emhttpd a form, as its pages do
+const EMBY_MOVERS_LOCK     = 'movers-start.lock';                 // in RUN_DIR: his and Ms. Moverelli's run starts, one at a time
 
 /** Where the rule reads and writes — the tests' stand-ins in $GLOBALS['embyMoverHost'] */
 function embyMoverHost(): array
@@ -268,6 +272,36 @@ function embyTuningOverrides(string $dir, array $shares, array $lists): array
     return $off;
 }
 
+/**
+ * The start lock Jack's and Ms. Moverelli's runs share: held only from the check «nothing of the other going» until the
+ * run's own marker (office-run.json, its lock) is written — waited for up to $wait s; null when it couldn't be had.
+ */
+function embyMoversLock(int $wait = 30, string $dir = RUN_DIR): mixed
+{
+    @mkdir($dir, 0700, true);
+    $f = @fopen("$dir/" . EMBY_MOVERS_LOCK, 'c');
+    if (!$f) {
+        return null;
+    }
+    $until = microtime(true) + $wait;
+    do {
+        if (flock($f, LOCK_EX | LOCK_NB)) {
+            return $f;
+        }
+        usleep(100000);
+    } while (microtime(true) < $until);
+    fclose($f);
+    return null;
+}
+
+function embyMoversUnlock(mixed $f): void
+{
+    if (is_resource($f)) {
+        flock($f, LOCK_UN);
+        fclose($f);
+    }
+}
+
 /** The first active line of a cron file matching $pattern (no comment lines), its five time fields; or null */
 function embyMoverCronLine(string $text, string $pattern): ?string
 {
@@ -329,10 +363,13 @@ function embyMoverRule(bool $enforce = true, ?array $h = null): array
     $own = embyMoverOwn($h);
     $t = embyTuningLook($h, $enforce && ($h['hired'])());
     $m = ($h['moverelli'])();
-    $uncovered = $m === null ? [] : embyMoverelliUncovered($m, ($h['lists'])(), ($h['shares'])());
+    $lists = ($h['lists'])();
+    $uncovered = $m === null ? [] : embyMoverelliUncovered($m, $lists, ($h['shares'])());
+    // Ms. Moverelli hired and keeping his list out replaces Mover Tuning's list: only its forced schedule still counts
     $why = match (true) {
         !embyMoverScheduleOff($own)                  => 'schedule',
         (bool) $uncovered                            => 'moverelli_list',
+        $m !== null                                  => $t['installed'] && $t['force'] ? 'tuning_force' : null,
         !$t['installed']                             => null,
         !$t['listed']                                => 'tuning_list',
         $t['force']                                  => 'tuning_force',
@@ -341,7 +378,7 @@ function embyMoverRule(bool $enforce = true, ?array $h = null): array
     };
     return ['ok' => $why === null, 'way' => $why === null ? ($m !== null ? 'moverelli' : 'disabled') : null, 'why' => $why,
             'schedule' => $own['cron'] ?? ($own['set'] !== '' ? $own['set'] : null), 'tuning' => $t,
-            'moverelli' => $m === null ? null : ['uncovered' => $uncovered]];
+            'moverelli' => $m === null ? null : ['uncovered' => $uncovered, 'file' => $lists[0] ?? '']];
 }
 
 /** The rule as a refusal of a real run, or null */
@@ -359,7 +396,11 @@ function embyMoverProblem(array $rule): ?Problem
     };
     return new Problem($key, array_filter([
         'schedule' => $rule['schedule'] ?? null,
-        'file'     => in_array($rule['why'], ['tuning_list', 'moverelli_list'], true) ? ($rule['tuning']['file'] ?? null) : null,
+        'file'     => match ($rule['why']) {
+            'tuning_list'     => $rule['tuning']['file'] ?? null,
+            'moverelli_list'  => $rule['moverelli']['file'] ?? null,      // EmbyCache's list — also without Mover Tuning
+            default           => null,
+        },
         'shares'   => match ($rule['why']) {
             'tuning_override' => implode(', ', $rule['tuning']['overrides']),
             'moverelli_list'  => implode(', ', $rule['moverelli']['uncovered'] ?? []),
