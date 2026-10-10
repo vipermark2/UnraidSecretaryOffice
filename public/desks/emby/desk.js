@@ -233,7 +233,9 @@ const moverOk = () => { const m = mover(); return !m || !!m.ok; };
 /** Why real runs don't go now, in words (the agent's refusal) */
 function moverWhy(m) {
   const t = m.tuning || {};
-  return Office.errorText({ key: 'emby_mover_' + m.why, params: { file: t.file || '', detail: t.error || '', shares: (t.overrides || []).join(', ') } }, ID);
+  // Ms. Moverelli's ini without his list: her shares named (emby-mover.php embyMoverelliUncovered())
+  const shares = m.why === 'moverelli_list' ? ((m.moverelli || {}).uncovered || []) : (t.overrides || []);
+  return Office.errorText({ key: 'emby_mover_' + m.why, params: { file: t.file || '', detail: t.error || '', shares: shares.join(', ') } }, ID);
 }
 
 /**
@@ -261,6 +263,7 @@ function moverNotice() {
     }
   } else {
     box.appendChild(el('p', 'role', T('mover.ok.disabled')));
+    if (m.way === 'moverelli') box.appendChild(el('p', 'role', T('mover.ok.moverelli')));
     if (t.installed && t.listed) box.appendChild(el('p', 'role', T('mover.ok.tuning', { file: t.file || '' })));
   }
   if (t.changed) box.appendChild(el('p', 'role', T('mover.changed', { file: t.file || '' })));

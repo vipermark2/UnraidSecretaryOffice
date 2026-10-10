@@ -2278,6 +2278,10 @@ function embyRunCheck(string $tool, string $mode): void
         || flockHeld(EMBY_DATA . '/embycache.lock') || flockHeld(GATHER_LOCK)) {
         throw new Problem('emby_running');
     }
+    // never beside a run of Ms. Moverelli's Smart Mover (agent/desks/moverelli.php) — any of hers, any of his
+    if (function_exists('moverelliBusy') && moverelliBusy()) {
+        throw new Problem('emby_moverelli_running');
+    }
     // real runs only while Unraid's mover schedule is «Disabled» (emby-mover.php) — and Mover Tuning, if installed, keeps his list
     if ($mode === 'run' && ($p = embyMoverProblem(embyMoverRule()))) {
         throw $p;
@@ -2762,6 +2766,19 @@ function embySetSchedule(string $job, ?string $cron): array
  */
 function embyForeignSchedules(string $usDir = US_DIR, string $cronGlob = '/boot/config/plugins/*/*.cron', string $officeCron = OFFICE_CRON): array
 {
+    return officeForeignCalls(['embycache' => '/embycache_run\.py/', 'gather' => '/consolidate_master\.sh/'], $usDir, $cronGlob, [$officeCron]);
+}
+
+/**
+ * User Scripts entries and other plugins' cron lines that call one of $tools (tool => regex over what runs): Jack's
+ * look for EmbyCache and the gather started elsewhere, Ms. Moverelli's for other movers. A script names the first tool
+ * of $tools its active text matches, a cron line the tool matched first in it; cron lines that run a User Script are
+ * left to the script's entry, the files in $skip (the office's own cron file, …) are not read.
+ *
+ * @return list<array{tool: string, where: string, enabled: bool}>
+ */
+function officeForeignCalls(array $tools, string $usDir = US_DIR, string $cronGlob = '/boot/config/plugins/*/*.cron', array $skip = [OFFICE_CRON]): array
+{
     $found = [];
     // User Scripts keeps its schedules by the script's path; looked up by its folder like the watchman does
     $plans = [];
@@ -2773,7 +2790,13 @@ function embyForeignSchedules(string $usDir = US_DIR, string $cronGlob = '/boot/
     foreach (glob("$usDir/scripts/*/script") ?: [] as $file) {
         $name = basename(dirname($file));
         $text = embyActiveText((string) @file_get_contents($file, false, null, 0, 65536));
-        $tool = str_contains($text, 'embycache_run.py') ? 'embycache' : (str_contains($text, 'consolidate_master.sh') ? 'gather' : null);
+        $tool = null;
+        foreach ($tools as $t => $re) {
+            if (preg_match($re, $text)) {
+                $tool = $t;
+                break;
+            }
+        }
         if ($tool) {
             $plan = $plans[$name] ?? [];
             $freq = (string) ($plan['frequency'] ?? 'disabled');
@@ -2782,12 +2805,22 @@ function embyForeignSchedules(string $usDir = US_DIR, string $cronGlob = '/boot/
         }
     }
     foreach (glob($cronGlob) ?: [] as $file) {
-        if ($file === $officeCron) {
+        if (in_array($file, $skip, true)) {
             continue;
         }
         foreach (explode("\n", embyActiveText((string) @file_get_contents($file, false, null, 0, 1 << 20))) as $line) {
-            if (preg_match('/embycache_run\.py|consolidate_master\.sh/', $line, $m) && !str_contains($line, $usDir)) {
-                $found[] = ['tool' => str_starts_with($m[0], 'embycache') ? 'embycache' : 'gather', 'where' => $file, 'enabled' => true];
+            if (str_contains($line, $usDir)) {
+                continue;
+            }
+            $tool = null;
+            $at = PHP_INT_MAX;
+            foreach ($tools as $t => $re) {
+                if (preg_match($re, $line, $m, PREG_OFFSET_CAPTURE) && $m[0][1] < $at) {
+                    [$tool, $at] = [$t, $m[0][1]];
+                }
+            }
+            if ($tool !== null) {
+                $found[] = ['tool' => $tool, 'where' => $file, 'enabled' => true];
             }
         }
     }
@@ -2837,13 +2870,18 @@ function embyMoverFinding(array $rule): array
         'tuning_list'     => 'mover_tuning',
         'tuning_force'    => 'mover_force',
         'tuning_override' => 'mover_override',
+        'moverelli_list'  => 'mover_moverelli',
         default           => 'mover',
     };
     $t = $rule['tuning'];
     return finding($id, 'required', $rule['ok'], array_filter([
         'file'     => $id === 'mover_tuning' ? (string) ($t['file'] ?? '') : null,
         'detail'   => $id === 'mover_tuning' ? (string) ($t['error'] ?? '') : null,
-        'shares'   => $id === 'mover_override' ? implode(', ', $t['overrides'] ?? []) : null,
+        'shares'   => match ($id) {
+            'mover_override'  => implode(', ', $t['overrides'] ?? []),
+            'mover_moverelli' => implode(', ', $rule['moverelli']['uncovered'] ?? []),
+            default           => null,
+        },
     ], fn ($v) => $v !== null), '#/emby');
 }
 
